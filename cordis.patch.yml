@@ -1,0 +1,6 @@
+# The bundle installs one opt-in Host row. Enable it for discovery in every
+# agent, or leave it disabled and mount `dsh-magpie-discovery` in a preset.
+- insert:
+    - id: magpie-tool-discovery
+      name: dsh-magpie-discovery
+      disabled: true

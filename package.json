@@ -1,0 +1,53 @@
+{
+  "name": "dsh-magpie-discovery",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "On-demand Magpie MCP tool discovery for DeepSeek Harness agents.",
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.1-rc.5 <0.3.0"
+  },
+  "exports": {
+    ".": "./discovery.js",
+    "./discovery": "./discovery.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "discovery.js",
+    "discovery-core.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "magpie",
+    "mcp",
+    "tool-discovery",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/donhac/dsh-magpie-discovery.git"
+  },
+  "bugs": {
+    "url": "https://github.com/donhac/dsh-magpie-discovery/issues"
+  },
+  "homepage": "https://github.com/donhac/dsh-magpie-discovery#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
