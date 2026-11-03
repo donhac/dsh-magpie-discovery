@@ -11,7 +11,7 @@ import {
 } from './discovery-core.js';
 
 export const name = 'dsh-magpie-discovery';
-export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'agentPresets'];
+export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'agentPresets', 'agents'];
 
 const namesSchema = { type: 'array', items: { type: 'string' } };
 const outputSchema = {
@@ -65,7 +65,13 @@ export function createDiscovery(ctx, config = {}) {
     try { return ctx.agentPresets.composedPreset(subject); } catch { return undefined; }
   };
   const ownerPreset = config.presetId ?? compositionOf(ctx);
-  const owns = agent => ownerPreset === undefined || compositionOf(agent.ctx) === ownerPreset;
+  const owns = agent => {
+    if (ownerPreset !== undefined && compositionOf(agent.ctx) !== ownerPreset) return false;
+    // Live preset revisions may share an id. Only manage the revision that
+    // resolves this discovery definition; an external deny is not an exit.
+    const visible = ctx.tools.get(TOOL_NAME, agent);
+    return visible === undefined || visible === toolDefinition;
+  };
   const readCatalog = () => ctx.tools.schemas().filter(tool => tool.name.startsWith(PREFIX));
   const warn = message => {
     try { ctx.logger?.warn?.(`magpie-tool-discovery: ${message}`); } catch { /* logging must not break the step */ }
@@ -105,7 +111,7 @@ export function createDiscovery(ctx, config = {}) {
             const signature = JSON.stringify(deny);
             if (signature === state.signature) continue;
             // Install first: the overlap is more restrictive, never an all-tools gap.
-            const next = agent.ctx.tools.restrict({ deny });
+            const next = deny.length ? agent.ctx.tools.restrict({ deny }) : null;
             const previous = state.mask;
             state.mask = next;
             state.signature = signature;
@@ -125,17 +131,25 @@ export function createDiscovery(ctx, config = {}) {
     const state = { signature: null, mask: null, closing: false, dispose: null };
     const dispose = agent.ctx.effect(() => {
       agents.set(agent, state);
-      let removeExitCheck;
+      let removeExitCheck, removeCommitCheck;
       const cleanup = () => {
         if (state.closing) return;
         state.closing = true;
         agents.delete(agent);
         removeExitCheck?.();
+        removeCommitCheck?.();
         state.mask?.();
         state.mask = null;
       };
       try {
         refresh();
+        // The loop assembles schemas BEFORE pre-step. Observe committed events
+        // synchronously so the next assembly sees the new selection. stateOf()
+        // materializes the pure projection; listener ordering cannot stale it.
+        removeCommitCheck = agent.ctx.on('session/event', (session, event) => {
+          if (session !== agent.session || !['tool/result', 'agent-preset/selected'].includes(event.type)) return;
+          syncSession(session);
+        });
         removeExitCheck = agent.ctx.on('agent/pre-step', async (_payload, next) => {
           if (!owns(agent)) state.dispose?.();
           return next();
@@ -149,6 +163,27 @@ export function createDiscovery(ctx, config = {}) {
     state.dispose = dispose;
   }
 
+  function syncSession(session) {
+    if (closing) return;
+    const agent = ctx.agents.get(session.id);
+    if (!agent || agent.session !== session) return;
+    try {
+      if (!owns(agent)) { agents.get(agent)?.dispose?.(); return; }
+      attach(agent);
+      refresh();
+    } catch (error) { warn(error instanceof Error ? error.message : String(error)); }
+  }
+
+  function reconcile() {
+    if (closing) return;
+    // Handles existing blank agents selecting a preset, and mounting/reloading
+    // this plugin while an agent already exists. No synthetic agent is created.
+    for (const agent of ctx.agents.list()) {
+      try { attach(agent); } catch (error) { warn(error instanceof Error ? error.message : String(error)); }
+    }
+    refresh();
+  }
+
   const toolDefinition = {
     name: TOOL_NAME,
     description: 'Find Magpie MCP tools and select their original definitions for the next model step. An empty call returns service counts; original permissions still apply.',
@@ -156,7 +191,7 @@ export function createDiscovery(ctx, config = {}) {
       type: 'object',
       additionalProperties: false,
       properties: {
-        query: { type: 'string', description: 'Task keywords, Chinese or English; 1–160 characters. Separate from names/reset.' },
+        query: { type: 'string', description: 'Service and task keywords, Chinese or English; 1–160 characters. Multiple operation names are alternatives. Separate from names/reset.' },
         names: { type: 'array', items: { type: 'string' }, description: 'Load 1–6 exact mcp__magpie__ tool names instead of searching.' },
         limit: { type: 'integer', description: 'Search page size, 1–6; default 3.' },
         offset: { type: 'integer', description: 'Search page offset; default 0.' },
@@ -183,7 +218,7 @@ export function createDiscovery(ctx, config = {}) {
   const section = {
     name: 'magpie-tool-discovery',
     order: 3900,
-    text: `Magpie provides browser/web, GitHub, DBX databases, SSH and TapTap capabilities. Use magpie_tools to discover relevant MCP tools, then call their original names on the following model step. Selection is not authorization. At most ${MAX_LOADED} recently selected tools remain loaded; rediscover an evicted tool when needed. Other DSH tools, including installed image generation/editing plugins, remain directly available.`
+    text: `Magpie provides browser/web, GitHub, DBX databases, SSH and TapTap capabilities. Use magpie_tools to discover relevant MCP tools, then call their original names on the following model step. Selection is not authorization. At most ${MAX_LOADED} recently selected tools remain loaded; rediscover an evicted tool when needed. Other DSH tools, including installed image generation/editing plugins, remain directly available. Never call an unrelated tool or use placeholder arguments just to advance discovery.`
   };
 
   // Exact yielded disposers are adopted into this ordered effect. Teardown is
@@ -192,11 +227,16 @@ export function createDiscovery(ctx, config = {}) {
     yield ctx.sessionProjections.register(projection);
     yield ctx.tools.register(toolDefinition);
     yield ctx.systemPrompt.section(section);
-    yield ctx.on('tools/change', refresh);
+    yield ctx.on('tools/change', reconcile);
+    yield ctx.on('session/event', (session, event) => {
+      // A blank agent's preset switch does not emit agent/created. The selected
+      // event is committed after rebinding, before its first model assembly.
+      if (event.type === 'agent-preset/selected') syncSession(session);
+    });
     yield ctx.on('agent/created', ({ agent }) => {
       try { attach(agent); } catch (error) { warn(error instanceof Error ? error.message : String(error)); }
     });
-    // Covers a blank existing agent selecting this preset before its first request.
+    // Defensive fallback only; normal updates happen before schema assembly.
     yield ctx.on('agent/pre-step', async ({ agent }, next) => {
       try { attach(agent); refresh(); } catch (error) { warn(error instanceof Error ? error.message : String(error)); }
       return next();
@@ -209,6 +249,7 @@ export function createDiscovery(ctx, config = {}) {
       for (const state of [...agents.values()]) state.dispose?.();
       agents.clear();
     };
+    reconcile();
   }, 'magpie-tool-discovery ordered lifecycle');
 
   return { attach, refresh, projection, trackedAgents: () => agents.size };

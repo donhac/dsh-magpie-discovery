@@ -19,10 +19,15 @@ Magpie 通过一个 MCP Hub 提供浏览器、网页搜索、GitHub、DBX 数据
 
 - DeepSeek Harness `>=0.2.1-rc.5 <0.3.0`（已在 `0.2.1-rc.5` 验证）。
 - Node.js `>=22.19.0`。
+- Host 服务 `tools`、`systemPrompt`、`sessionProjections`、`agentPresets` 和 `agents`。
 - Magpie 正在运行，且 DSH 已通过现有 MCP 客户端连接其 Hub。
 - 有一个挂载本包的位置：预设子项，或随包安装的可选 Host 行。
 
 本插件**不会**创建 Magpie 连接。没有配置 Magpie MCP 时，`magpie_tools` 返回空目录，其他工具仍正常工作。
+
+## 1.1.0 变更
+
+1.1.0 修复了发现结果晚一步生效、空白 Agent 选择预设后首轮全量定义的问题，并支持服务范围内多操作查询。变更和回归覆盖见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 安装
 
@@ -41,7 +46,7 @@ dsh plugin --profile <profile> add github:donhac/dsh-magpie-discovery
 固定版本：
 
 ```text
-github:donhac/dsh-magpie-discovery#v1.0.0
+github:donhac/dsh-magpie-discovery#v1.1.0
 ```
 
 安装后的 bundle 与插件行显示名为 **dsh-magpie-discovery**。随包还会插入一个**默认禁用**的 Host 行 `magpie-tool-discovery`。在下面两种使用方式中选一种。
@@ -61,7 +66,6 @@ github:donhac/dsh-magpie-discovery#v1.0.0
 
 - `presetId` 必须是包含该行的预设 id。
 - 它用于在 Agent 切换离开该预设时移除限制。
-- 插件需要 Host 服务 `tools`、`systemPrompt`、`sessionProjections` 和 `agentPresets`。
 
 这种方式只影响使用该预设的 Agent；其他预设保留完整的 Magpie 工具集。
 
@@ -76,6 +80,8 @@ github:donhac/dsh-magpie-discovery#v1.0.0
 ```js
 magpie_tools({ query: '浏览器标签页', limit: 2 })
 magpie_tools({ query: '数据库表结构' })
+magpie_tools({ query: 'dbx list connections sessions read only query', limit: 6 })
+magpie_tools({ query: 'nyatermSsh connection_list session_open terminal_execute', limit: 6 })
 magpie_tools({ names: ['mcp__magpie__playwright__browser_tabs'] })
 magpie_tools({})
 magpie_tools({ reset: true })
@@ -87,7 +93,11 @@ magpie_tools({ reset: true })
 - 空调用返回当前选择和各类服务数量。
 - `reset` 清空当前选择。
 
-选中的工具在**下一个模型步骤**才可见。这是有意设计的：同一个 assistant 步骤里已经规划好的调用，不会使用该请求中尚未出现的定义。先查询，再在下一步调用原工具。
+识别到服务名后，结果限定在该服务内。范围内的能力词和操作词按 OR 匹配，可以分别出现在不同工具上；但每个词都必须在该范围的目录中找到匹配，否则返回空结果。无服务范围的普通关键词查询仍按 AND 匹配；多个完整操作名按 OR 匹配。完整精确工具名排在首位。
+
+`+` 只是分隔符，不是操作符。`+dbx connection` 等泛连接查询优先返回 `list_connections`；明确请求 `create`/`add`、`duplicate`、`remove`/`delete` 时，对应写工具仍能正常检索。
+
+成功的发现结果提交后，选中的工具会出现在**紧接着的模型请求**中，无需额外缓冲步骤或调用无关工具。已经规划在当前 assistant 步骤内的调用不会回溯获得新定义；先查询，再在下一步调用原工具。
 
 每个会话最多保留 12 个最近选择的工具。重复选择会刷新位置，超过上限时移除最早的选择。
 
@@ -110,7 +120,9 @@ deny = 当前 Magpie 目录 - 本会话已选工具
 
 仅返回但尚未提交为工具结果的 value 不会解锁任何工具。
 
-选择、限制和监听器按有序生命周期安装。卸载时先释放 Agent 策略，再移除监听器与工具，最后移除投影。切换预设时，旧限制被清除；切回后由首次 pre-step 重新挂载。
+成功结果提交后，同步的 `session/event` 监听器读取投影并刷新 mask，使下一次工具定义 assemble 前即可得到新选择。空白 Agent 选择预设时，在 `agent-preset/selected` 提交后立即 attach，在首个模型请求前安装限制；插件挂载时也会协调已经存在的 Agent。`agent/pre-step` 仅作为兜底，不再承担正常更新的时序。
+
+选择、限制和监听器按有序生命周期安装。卸载时先释放 Agent 策略，再移除监听器与工具，最后移除投影。切换预设时移除旧 mask，并在选择提交时挂载匹配预设的策略。这些 hook 只更新可见性，业务执行、审批、结果展示、元数据和 finalizer 仍走 DSH 原生工具链。
 
 ## 配置
 
@@ -123,6 +135,7 @@ Host 行不需要配置，行为是全局的。预设挂载不填 `presetId` 时
 ## 安全与边界
 
 - **选择不等于授权。** 其他插件的 allow/deny、guard 和审批继续生效。搜索命中只是候选，最终可调用集合是所有策略的交集。
+- **读取偏好不保证只读。** 排序依据工具名和描述，不是授权策略，也不证明工具不会写入；写工具仍可被发现。
 - **不是安全沙箱。** 本插件只控制模型可见的工具定义，不断开 MCP，不移除服务器说明，也不改变文件或网络权限。
 - **仅限 Magpie。** 只隐藏全局 `mcp__magpie__` 名称；其他 MCP、原生工具和图片插件不受影响。
 - **同名 scoped 工具。** 若其他插件把同名真实工具直接注册在 Agent 自己的 scope，DSH 的 own-scope 豁免会使本限制无法隐藏它。该拓扑不受支持。
@@ -140,13 +153,16 @@ Host 行不需要配置，行为是全局的。预设挂载不填 `presetId` 时
 
 ## 开发
 
-无运行依赖、无构建步骤。
+无运行依赖、无构建步骤。安装锁定的开发依赖后，同时运行纯核心测试和运行时回归：
 
 ```sh
+npm ci --ignore-scripts
 npm test
 ```
 
-测试覆盖参数校验、中英文排序、12 项上限、精确加载、重置、投影状态校验，以及“只有已提交、匹配且成功的原生结果才能授权选择”的规则。
+核心测试覆盖参数校验、中英文排序、服务范围内多操作查询、未知词拒绝、连接发现与明确写意图、精确加载、分页、6/12 项上限、重置和投影状态校验。
+
+运行时测试实例化 DSH 真实的 AgentLoop、预设注册表、工具运行时和会话投影注册表，使用脚本化 LLM adapter 与内存 fixture 工具。测试检查实际送到 adapter 的请求，覆盖空白 Agent 选预设后的首请求收起、发现后紧邻请求立即可用、关闭前无需额外打开、预设切换、保留的旧修订、日志重放、卸载和多 Agent 独立性。同时验证其他 deny/guard 继续生效，原生图片工具定义、结果元数据与 finalizer 保持原行为。测试本身不发起网络、真实 MCP、模型或图片供应商调用，不消耗图像额度；安装开发依赖需要访问包注册表。
 
 本地试用：
 

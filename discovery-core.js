@@ -47,27 +47,52 @@ export function parseRequest(args) {
   return { action: hasQuery ? 'search' : hasNames ? 'load' : reset ? 'reset' : 'status', query: args.query?.trim(), names: args.names, limit: args.limit ?? 3, offset: args.offset ?? 0 };
 }
 
+const readActions = new Set(['list', 'get', 'read', 'describe', 'search', 'find', 'check', 'inspect']);
+const actionAliases = [['create', 'add'], ['remove', 'delete']];
+
 export function rank(catalog, query) {
-  const normalized = query.toLowerCase();
+  const normalized = query.toLowerCase().replace(/\+/g, ' ').trim();
   const groups = [];
-  for (const term of normalized.match(/[a-z0-9_./-]+|[\p{Script=Han}]+/gu) ?? []) {
+  // "read only" is a ranking hint, not a capability shared by every requested tool.
+  const terms = normalized.replace(/\bread[\s_-]+only\b/g, ' ');
+  for (const term of terms.match(/[a-z0-9_./-]+|[\p{Script=Han}]+/gu) ?? []) {
     if (/\p{Script=Han}/u.test(term)) {
       const mapped = aliases.filter(([word]) => term.includes(word)).map(([, synonyms]) => synonyms);
       groups.push(...(mapped.length ? mapped : [[term]]));
-    } else groups.push([term]);
+    } else groups.push(actionAliases.find(words => words.includes(term)) ?? [term]);
   }
   if (!groups.length) return [];
-  return catalog.map(tool => {
+  const entries = catalog.map(tool => {
     const name = tool.name.toLowerCase();
-    const description = tool.description.toLowerCase();
-    let score = name === normalized ? 10000 : 0;
-    for (const group of groups) {
-      const best = Math.max(...group.map(term => name.includes(term) ? 30 : description.includes(term) ? 5 : 0));
-      if (!best) return null;
-      score += best;
-    }
-    return { tool, score };
-  }).filter(Boolean).sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name)).map(match => match.tool);
+    const [service, operation] = name.slice(PREFIX.length).split('__');
+    return { tool, name, service, operation, description: tool.description.toLowerCase() };
+  });
+  const services = new Set(entries.map(entry => entry.service));
+  const scope = new Set(groups.flatMap(group => group.filter(term => services.has(term))));
+  const keywords = groups.filter(group => !group.some(term => scope.has(term)));
+  const scoped = entries.filter(entry => !scope.size || scope.has(entry.service));
+  const operations = new Set(scoped.flatMap(entry => [entry.name, entry.operation]));
+  const alternatives = scope.size > 0 || keywords.length > 1 && keywords.every(group => group.some(term => operations.has(term)));
+  const matches = scoped.map(entry => {
+    const scores = keywords.map(group => {
+      // In a capability list, generic reading verbs carry less weight than subjects.
+      const nameScore = keywords.length > 1 && group.some(word => readActions.has(word)) ? 10 : 30;
+      return Math.max(...group.map(term => {
+        // Small plural folding handles connections/sessions without a language parser.
+        const forms = term.endsWith('s') && term.length > 4 ? [term, term.slice(0, -1)] : [term];
+        return Math.max(...forms.map(word => entry.name.includes(word) ? nameScore : entry.description.includes(word) ? 5 : 0));
+      }));
+    });
+    return { ...entry, scores };
+  });
+  // Relax per-tool AND only after every keyword is accounted for inside the service.
+  // Unknown words must not turn a search into a broad automatic load.
+  if (keywords.some((_, index) => !matches.some(entry => entry.scores[index]))) return [];
+  return matches.filter(entry => !keywords.length || (alternatives ? entry.scores.some(Boolean) : entry.scores.every(Boolean))).map(entry => {
+    const readBonus = entry.operation?.split('_').some(word => readActions.has(word)) ? 10 : 0;
+    const score = (entry.name === normalized ? 10000 : 0) + entry.scores.reduce((sum, value) => sum + value, 0) + readBonus;
+    return { tool: entry.tool, score };
+  }).sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name)).map(match => match.tool);
 }
 
 export function lookup(catalog, selected, args) {
