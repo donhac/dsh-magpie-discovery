@@ -25,9 +25,9 @@ Magpie 通过一个 MCP Hub 提供浏览器、网页搜索、GitHub、DBX 数据
 
 本插件**不会**创建 Magpie 连接。没有配置 Magpie MCP 时，`magpie_tools` 返回空目录，其他工具仍正常工作。
 
-## 1.1.0 变更
+## 1.2.0 变更
 
-1.1.0 修复了发现结果晚一步生效、空白 Agent 选择预设后首轮全量定义的问题，并支持服务范围内多操作查询。变更和回归覆盖见 [CHANGELOG.md](./CHANGELOG.md)。
+发现结果增加 `added`、`evicted`、`unchanged`。通过 `names` 配合 `replace: true`，可一次把阶段工具集合替换为最多 12 个精确名称；任一名称不可用时整体失败，保留原选择。继续保持紧接着的请求即可使用、原生执行与权限策略。变更和回归覆盖见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 安装
 
@@ -46,7 +46,7 @@ dsh plugin --profile <profile> add github:donhac/dsh-magpie-discovery
 固定版本：
 
 ```text
-github:donhac/dsh-magpie-discovery#v1.1.0
+github:donhac/dsh-magpie-discovery#v1.2.0
 ```
 
 安装后的 bundle 与插件行显示名为 **dsh-magpie-discovery**。随包还会插入一个**默认禁用**的 Host 行 `magpie-tool-discovery`。在下面两种使用方式中选一种。
@@ -88,7 +88,9 @@ magpie_tools({ reset: true })
 ```
 
 - `query` 搜索名称与描述，支持英文 API 词和常见中文能力词。
-- `names` 按 1–6 个精确 `mcp__magpie__...` 名称加载。
+- `names` 按 1–6 个精确 `mcp__magpie__...` 名称增量加载。
+- 配合 `replace: true` 可用 1–12 个名称一次替换完整集合，全部名称必须存在于目录，否则保留原集合。请包含仍需清理资源的工具。`replace` 不与查询、reset 或分页参数混用。
+- 成功结果包含相对前集合的 `added`、`evicted`、`unchanged`；已可见工具可直接调用，不必重复发现。
 - `limit` 为 1–6，默认 3；`offset` 用于翻页。
 - 空调用返回当前选择和各类服务数量。
 - `reset` 清空当前选择。

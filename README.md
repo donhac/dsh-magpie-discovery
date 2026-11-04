@@ -25,9 +25,9 @@ It is a visibility layer, not a second MCP client and not a call proxy. Selected
 
 This plugin does **not** create a Magpie connection. If no Magpie MCP server is configured, `magpie_tools` reports an empty catalog and other tools continue to work.
 
-## 1.1.0 changes
+## 1.2.0 changes
 
-Version 1.1.0 makes discovery updates available in the immediately following model request, masks blank agents when they select the preset, and supports service-scoped searches for multiple operations. See [CHANGELOG.md](./CHANGELOG.md) for the changes and regression coverage.
+Discovery results now report `added`, `evicted` and `unchanged`. Use `names` with `replace: true` to switch a task phase to a complete set of up to 12 tools in one call. Replacement is atomic: an unavailable name fails without clearing the previous selection. The immediately-following-request behavior and original execution/permission pipeline are preserved. See [CHANGELOG.md](./CHANGELOG.md) for regression coverage.
 
 ## Install
 
@@ -46,7 +46,7 @@ dsh plugin --profile <profile> add github:donhac/dsh-magpie-discovery
 For a pinned release:
 
 ```text
-github:donhac/dsh-magpie-discovery#v1.1.0
+github:donhac/dsh-magpie-discovery#v1.2.0
 ```
 
 The installed bundle and plugin row are displayed as **dsh-magpie-discovery**. The bundle also inserts a **disabled** Host row named `magpie-tool-discovery`. Choose one of the two usage modes below.
@@ -88,7 +88,9 @@ magpie_tools({ reset: true })
 ```
 
 - `query` searches names and descriptions. English API terms and common Chinese capability words both work.
-- `names` loads 1–6 exact `mcp__magpie__...` names.
+- `names` loads 1–6 exact `mcp__magpie__...` names incrementally.
+- With `names`, `replace: true` atomically replaces the complete selection with 1–12 names. All names must exist in the catalog; a failed replacement preserves the old set. Include tools still needed for cleanup. `replace` cannot accompany query, reset or pagination.
+- Successful results include `added`, `evicted` and `unchanged` relative to the previous set. Already visible tools can be called directly without another lookup.
 - `limit` is 1–6 and defaults to 3; `offset` pages through matches.
 - An empty call returns the current selection and service counts.
 - `reset` clears the current selection.

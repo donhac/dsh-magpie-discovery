@@ -31,20 +31,24 @@ export function select(current, additions) {
 
 export function parseRequest(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Arguments must be an object.');
-  if (Object.keys(args).some(key => !['query', 'names', 'limit', 'offset', 'reset'].includes(key))) throw new Error('Unknown lookup parameter.');
+  if (Object.keys(args).some(key => !['query', 'names', 'replace', 'limit', 'offset', 'reset'].includes(key))) throw new Error('Unknown lookup parameter.');
   const hasQuery = args.query !== undefined;
   const hasNames = args.names !== undefined;
+  const hasReplace = args.replace !== undefined;
   const reset = args.reset === true;
   if (args.reset !== undefined && typeof args.reset !== 'boolean') throw new Error('reset must be a boolean.');
+  if (hasReplace && typeof args.replace !== 'boolean') throw new Error('replace must be a boolean.');
+  if (hasReplace && (!hasNames || hasQuery || args.reset !== undefined || args.limit !== undefined || args.offset !== undefined)) throw new Error('replace applies to names only; separate from query, reset, limit and offset.');
   if (Number(hasQuery) + Number(hasNames) + Number(reset) > 1) throw new Error('Use query, names, or reset separately.');
   if (hasQuery && (typeof args.query !== 'string' || !args.query.trim() || args.query.length > 160)) throw new Error('query must contain 1–160 characters.');
-  if (hasNames && (!Array.isArray(args.names) || args.names.length < 1 || args.names.length > MAX_BATCH || !args.names.every(isName) || new Set(args.names).size !== args.names.length)) throw new Error(`names must contain 1–${MAX_BATCH} unique exact Magpie tool names.`);
+  const maxNames = args.replace === true ? MAX_LOADED : MAX_BATCH;
+  if (hasNames && (!Array.isArray(args.names) || args.names.length < 1 || args.names.length > maxNames || !args.names.every(isName) || new Set(args.names).size !== args.names.length)) throw new Error(`names must contain 1–${maxNames} unique exact Magpie tool names.`);
   for (const [key, fallback, max] of [['limit', 3, MAX_BATCH], ['offset', 0, 10000]]) {
     const value = args[key] ?? fallback;
     if (!Number.isInteger(value) || value < (key === 'limit' ? 1 : 0) || value > max) throw new Error(`Invalid ${key}.`);
   }
   if (!hasQuery && (args.limit !== undefined || args.offset !== undefined)) throw new Error('limit and offset apply to query only.');
-  return { action: hasQuery ? 'search' : hasNames ? 'load' : reset ? 'reset' : 'status', query: args.query?.trim(), names: args.names, limit: args.limit ?? 3, offset: args.offset ?? 0 };
+  return { action: hasQuery ? 'search' : hasNames ? args.replace === true ? 'replace' : 'load' : reset ? 'reset' : 'status', query: args.query?.trim(), names: args.names, limit: args.limit ?? 3, offset: args.offset ?? 0 };
 }
 
 const readActions = new Set(['list', 'get', 'read', 'describe', 'search', 'find', 'check', 'inspect']);
@@ -103,12 +107,19 @@ export function lookup(catalog, selected, args) {
     const matches = rank(catalog, request.query);
     totalMatches = matches.length;
     candidates = matches.slice(request.offset, request.offset + request.limit);
-  } else if (request.action === 'load') {
+  } else if (request.action === 'load' || request.action === 'replace') {
     const byName = new Map(catalog.map(tool => [tool.name, tool]));
+    if (request.action === 'replace') {
+      const unavailable = request.names.filter(name => !byName.has(name));
+      if (unavailable.length) throw new Error(`Unavailable Magpie tool names: ${unavailable.join(', ')}. Selection unchanged.`);
+    }
     candidates = request.names.map(name => byName.get(name)).filter(Boolean);
     totalMatches = candidates.length;
   }
-  const next = request.action === 'reset' ? [] : select(selected, candidates.map(tool => tool.name));
+  const candidateNames = candidates.map(tool => tool.name);
+  const next = request.action === 'reset' ? [] : request.action === 'replace' ? candidateNames : select(selected, candidateNames);
+  const before = new Set(selected);
+  const after = new Set(next);
   const groups = new Map();
   for (const tool of catalog) {
     const service = tool.name.slice(PREFIX.length).split('__')[0];
@@ -118,6 +129,9 @@ export function lookup(catalog, selected, args) {
     action: request.action,
     matches: candidates.map(tool => ({ name: tool.name, description: tool.description.slice(0, 360) })),
     selected: next,
+    added: next.filter(name => !before.has(name)),
+    evicted: selected.filter(name => !after.has(name)),
+    unchanged: next.filter(name => before.has(name)),
     totalMatches,
     hasMore: request.action === 'search' && request.offset + candidates.length < totalMatches,
     catalogSize: catalog.length,

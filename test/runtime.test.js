@@ -86,6 +86,106 @@ test('real AgentLoop: loading close_session closes on the adjacent request witho
   assert.ok(e.results(agent).every(result => result.data.message.isError === false));
 }));
 
+const lookupValue = event => JSON.parse(event.data.message.content[0].text);
+const delta = value => ({ added: value.added, evicted: value.evicted, unchanged: value.unchanged });
+
+test('real AgentLoop: replacement changes the adjacent request, keeps cleanup and preserves external deny/guard', { timeout: 10000 }, t => fixture(t, async e => {
+  const agent = await e.makeAgent();
+  agent.ctx.tools.restrict({ deny: [BLOCKED] });
+  agent.ctx.tools.guard(exec => exec.name === GUARDED ? 'external replacement guard' : undefined);
+  const requests = await e.run(agent, [
+    toolCall(TOOL_NAME, { names: [READ, OPEN, CLOSE] }),
+    toolCall(TOOL_NAME, { names: [CLOSE, BLOCKED, GUARDED], replace: true }),
+    toolCall(GUARDED), toolCall(CLOSE), toolCall(READ), null,
+  ]);
+  assert.deepEqual(magpie(requests[1]).sort(), [READ, OPEN, CLOSE].sort());
+  for (const request of requests.slice(2)) {
+    assert.deepEqual(magpie(request).sort(), [CLOSE, GUARDED].sort());
+    assert.ok(!names(request).includes(BLOCKED), 'external deny remains authoritative');
+  }
+  assert.deepEqual(e.state(agent).selected, [CLOSE, BLOCKED, GUARDED], 'externally denied names remain in the selected set');
+  assert.equal(e.root.tools.get(CLOSE, agent), e.originals.get(CLOSE));
+  assert.deepEqual(e.calls.map(call => call.name), [CLOSE], 'replacement only selects, and the guard still prevents execution');
+  assert.deepEqual(e.counts(), { open: 0, close: 1 });
+  const results = e.results(agent);
+  const replaced = lookupValue(results[1]);
+  assert.equal(replaced.action, 'replace');
+  assert.deepEqual(delta(replaced), { added: [BLOCKED, GUARDED], evicted: [READ, OPEN], unchanged: [CLOSE] });
+  assert.match(JSON.stringify(results[2]), /external replacement guard/);
+  assert.equal(results[4].data.message.isError, true);
+  assert.match(JSON.stringify(results[4]), /UNKNOWN_TOOL/);
+}));
+
+test('real AgentLoop: unavailable or conflicting replacements retain the committed selection on every adjacent request', { timeout: 10000 }, t => fixture(t, async e => {
+  const agent = await e.makeAgent();
+  const previous = [READ, CLOSE];
+  const requests = await e.run(agent, [
+    toolCall(TOOL_NAME, { names: previous }),
+    toolCall(TOOL_NAME, { names: [OPEN, `${PREFIX}fixture__unavailable`, CLOSE], replace: true }),
+    toolCall(TOOL_NAME, { names: [OPEN], replace: true, offset: 0 }),
+    toolCall(TOOL_NAME, {}), toolCall(CLOSE), null,
+  ]);
+  for (const request of requests.slice(1)) assert.deepEqual(magpie(request).sort(), previous.toSorted());
+  assert.deepEqual(e.state(agent).selected, previous);
+  assert.deepEqual(e.state(agent).pending, []);
+  assert.deepEqual(e.calls.map(call => call.name), [CLOSE]);
+  const results = e.results(agent);
+  assert.equal(results[1].data.message.isError, true);
+  assert.match(JSON.stringify(results[1]), /Unavailable Magpie tool names/);
+  assert.equal(results[2].data.message.isError, true);
+  assert.match(JSON.stringify(results[2]), /replace applies to names only/);
+  assert.deepEqual(delta(lookupValue(results[3])), { added: [], evicted: [], unchanged: previous });
+}));
+
+test('real AgentLoop: reloading and replacement reorder without false evictions, then reset reports the complete delta', { timeout: 10000 }, t => fixture(t, async e => {
+  const agent = await e.makeAgent();
+  const requests = await e.run(agent, [
+    toolCall(TOOL_NAME, { names: [READ, CLOSE] }),
+    toolCall(TOOL_NAME, { names: [READ], replace: false }),
+    toolCall(TOOL_NAME, { names: [READ, CLOSE], replace: true }),
+    toolCall(TOOL_NAME, { reset: true }), null,
+  ]);
+  for (const request of requests.slice(1, 4)) assert.deepEqual(magpie(request).sort(), [READ, CLOSE].sort());
+  assert.deepEqual(magpie(requests[4]), []);
+  const results = e.results(agent).map(lookupValue);
+  assert.deepEqual(delta(results[0]), { added: [READ, CLOSE], evicted: [], unchanged: [] });
+  assert.deepEqual(delta(results[1]), { added: [], evicted: [], unchanged: [CLOSE, READ] });
+  assert.deepEqual(delta(results[2]), { added: [], evicted: [], unchanged: [READ, CLOSE] });
+  assert.deepEqual(delta(results[3]), { added: [], evicted: [READ, CLOSE], unchanged: [] });
+  assert.deepEqual(e.calls, [], 'discovery never executes an original tool');
+  const definition = e.root.tools.get(TOOL_NAME, agent);
+  assert.equal(definition.parameters.properties.replace.type, 'boolean');
+  assert.ok(definition.output.schema.properties.action.enum.includes('replace'));
+  for (const field of ['added', 'evicted', 'unchanged']) {
+    assert.ok(definition.output.schema.required.includes(field));
+    assert.deepEqual(definition.output.schema.properties[field], { type: 'array', items: { type: 'string' } });
+    for (const value of results) {
+      assert.ok(value[field].length <= 12);
+      assert.equal(new Set(value[field]).size, value[field].length);
+    }
+  }
+}));
+
+test('real AgentLoop: replacement restores from native results and remains isolated from a second Agent', { timeout: 10000 }, t => fixture(t, async e => {
+  const original = await e.makeAgent();
+  const second = await e.makeAgent();
+  await e.run(second, [toolCall(TOOL_NAME, { names: [OPEN] }), null]);
+  await e.run(original, [
+    toolCall(TOOL_NAME, { names: [READ, OPEN] }),
+    toolCall(TOOL_NAME, { names: [CLOSE], replace: true }), null,
+  ]);
+  const seed = structuredClone(e.logs.get(original.id));
+  const restored = await e.makeAgent('donh-dev', seed);
+  const restoredRequests = await e.run(restored, [toolCall(CLOSE), null]);
+  assert.deepEqual(magpie(restoredRequests[0]), [CLOSE]);
+  assert.deepEqual(e.state(restored).selected, [CLOSE]);
+  assert.deepEqual(e.state(original).selected, [CLOSE]);
+  const secondRequests = await e.run(second, [toolCall(OPEN), null]);
+  assert.deepEqual(magpie(secondRequests[0]), [OPEN]);
+  assert.deepEqual(e.state(second).selected, [OPEN]);
+  assert.deepEqual(e.calls.map(call => call.name), [CLOSE, OPEN]);
+}));
+
 test('real preset registry: blank Agent exits donh-dev and first standard request releases its mask', { timeout: 10000 }, t => fixture(t, async e => {
   const agent = await e.makeAgent();
   await e.root.agentPresets.select(agent, 'standard');

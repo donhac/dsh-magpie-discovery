@@ -17,9 +17,9 @@ const namesSchema = { type: 'array', items: { type: 'string' } };
 const outputSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['action', 'matches', 'selected', 'totalMatches', 'hasMore', 'catalogSize', 'groups'],
+  required: ['action', 'matches', 'selected', 'added', 'evicted', 'unchanged', 'totalMatches', 'hasMore', 'catalogSize', 'groups'],
   properties: {
-    action: { type: 'string', enum: ['status', 'search', 'load', 'reset'] },
+    action: { type: 'string', enum: ['status', 'search', 'load', 'replace', 'reset'] },
     matches: {
       type: 'array',
       items: {
@@ -30,6 +30,9 @@ const outputSchema = {
       }
     },
     selected: namesSchema,
+    added: namesSchema,
+    evicted: namesSchema,
+    unchanged: namesSchema,
     totalMatches: { type: 'integer' },
     hasMore: { type: 'boolean' },
     catalogSize: { type: 'integer' },
@@ -192,7 +195,8 @@ export function createDiscovery(ctx, config = {}) {
       additionalProperties: false,
       properties: {
         query: { type: 'string', description: 'Service and task keywords, Chinese or English; 1–160 characters. Multiple operation names are alternatives. Separate from names/reset.' },
-        names: { type: 'array', items: { type: 'string' }, description: 'Load 1–6 exact mcp__magpie__ tool names instead of searching.' },
+        names: { type: 'array', items: { type: 'string' }, description: 'Load 1–6 unique exact mcp__magpie__ tool names; with replace:true, supply the full set of 1–12.' },
+        replace: { type: 'boolean', description: 'Only with names, separate from query/reset/limit/offset. True atomically replaces selection; any unavailable name fails unchanged. Default false adds names.' },
         limit: { type: 'integer', description: 'Search page size, 1–6; default 3.' },
         offset: { type: 'integer', description: 'Search page offset; default 0.' },
         reset: { type: 'boolean', description: 'True clears selected MCP tools; separate from query/names.' }
@@ -218,7 +222,7 @@ export function createDiscovery(ctx, config = {}) {
   const section = {
     name: 'magpie-tool-discovery',
     order: 3900,
-    text: `Magpie provides browser/web, GitHub, DBX databases, SSH and TapTap capabilities. Use magpie_tools to discover relevant MCP tools, then call their original names on the following model step. Selection is not authorization. At most ${MAX_LOADED} recently selected tools remain loaded; rediscover an evicted tool when needed. Other DSH tools, including installed image generation/editing plugins, remain directly available. Never call an unrelated tool or use placeholder arguments just to advance discovery.`
+    text: `Magpie provides browser/web, GitHub, DBX databases, SSH and TapTap capabilities. Call already visible tools directly; use magpie_tools for missing tools, then their original names on the next step. Selection is not authorization. At most ${MAX_LOADED} tools remain loaded. When changing phases, names with replace:true sets the full selection; include needed cleanup tools. Rediscover evicted tools when needed. Other DSH tools, including installed image generation/editing plugins, remain directly available. Never call an unrelated tool or use placeholder arguments just to advance discovery.`
   };
 
   // Exact yielded disposers are adopted into this ordered effect. Teardown is

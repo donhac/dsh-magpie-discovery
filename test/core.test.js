@@ -40,6 +40,35 @@ test('parseRequest rejects conflicts and malformed values', () => {
   assert.throws(() => parseRequest({ unknown: true }), /Unknown/);
 });
 
+test('replace accepts 1–12 unique exact names while incremental loading stays capped at six', () => {
+  const full = Array.from({ length: MAX_LOADED }, (_, index) => N(`replacement_${index}`));
+  assert.equal(parseRequest({ names: full, replace: true }).action, 'replace');
+  assert.equal(parseRequest({ names: full.slice(0, 1), replace: true }).action, 'replace');
+  for (const args of [{ names: full }, { names: full, replace: false }]) {
+    assert.throws(() => parseRequest(args), /1–6/);
+  }
+  assert.equal(parseRequest({ names: full.slice(0, MAX_BATCH), replace: false }).action, 'load');
+  for (const names of [[], [...full, N('overflow')], [full[0], full[0]], ['not-magpie'], [null], [N('x'.repeat(192))], 'not-an-array']) {
+    assert.throws(() => parseRequest({ names, replace: true }), /1–12 unique exact/);
+  }
+});
+
+test('replace is boolean and only accompanies names without search, reset or pagination', () => {
+  for (const replace of [null, 0, 1, 'true', [], {}]) {
+    assert.throws(() => parseRequest({ names: [N('read')], replace }), /replace must be a boolean/);
+  }
+  for (const replace of [false, true]) {
+    for (const args of [
+      {}, { query: 'browser' }, { reset: true }, { reset: false },
+      { names: [N('read')], query: 'browser' },
+      { names: [N('read')], reset: true }, { names: [N('read')], reset: false },
+      { names: [N('read')], limit: 3 }, { names: [N('read')], offset: 0 }
+    ]) {
+      assert.throws(() => parseRequest({ ...args, replace }), /replace applies to names only/);
+    }
+  }
+});
+
 test('rank maps common Chinese capability words and English API terms', () => {
   assert.equal(rank(catalog, '浏览器')[0].name, N('browser_tabs'));
   assert.equal(rank(catalog, 'dbx query')[0].name, N('dbx_execute_query'));
@@ -192,6 +221,108 @@ test('selection keeps the most recent names within the cap', () => {
   assert.deepEqual(second.selected, names.slice(0, MAX_LOADED));
   const third = lookup(tools, second.selected, { names: [names[MAX_LOADED]] });
   assert.deepEqual(third.selected, names.slice(1));
+});
+
+const delta = result => ({ added: result.added, evicted: result.evicted, unchanged: result.unchanged });
+
+test('replacement atomically selects the full requested set, including cleanup tools', () => {
+  const full = directory.slice(0, MAX_LOADED).map(tool => tool.name).toReversed();
+  const previous = [S('terminal_execute'), D('close_session')];
+  const result = lookup(directory, previous, { names: full, replace: true });
+  assert.equal(result.action, 'replace');
+  assert.deepEqual(result.selected, full);
+  assert.deepEqual(names(result.matches), full);
+  assert.equal(result.totalMatches, MAX_LOADED);
+  assert.equal(result.hasMore, false);
+  assert.deepEqual(delta(result), {
+    added: full.filter(name => name !== D('close_session')),
+    evicted: [S('terminal_execute')], unchanged: [D('close_session')]
+  });
+  assert.deepEqual(previous, [S('terminal_execute'), D('close_session')]);
+  result.selected.pop();
+  assert.equal(full.length, MAX_LOADED, 'the result must not alias the input names');
+});
+
+test('an unavailable replacement name fails the whole request without changing either input', () => {
+  const previous = Object.freeze([D('close_session'), S('terminal_execute')]);
+  for (const requested of [
+    [D('unavailable')], [D('open_session'), D('unavailable'), D('close_session')],
+    [D('close_session'), D('unavailable')]
+  ]) {
+    const args = Object.freeze({ names: Object.freeze(requested), replace: true });
+    assert.throws(() => lookup(directory, previous, args), /Unavailable Magpie tool names:.*unavailable.*Selection unchanged/);
+    assert.deepEqual(previous, [D('close_session'), S('terminal_execute')]);
+    assert.deepEqual(args.names, requested);
+  }
+  const removedCatalog = directory.filter(tool => tool.name !== D('close_session'));
+  assert.throws(() => lookup(removedCatalog, previous, { names: [D('close_session')], replace: true }), /Unavailable/);
+});
+
+test('every lookup action reports set deltas, including reloading and reordering existing names', () => {
+  const previous = [N('browser_tabs'), N('dbx_execute_query')];
+  for (const args of [{}, { query: 'unavailable' }, { names: [N('unavailable')] }]) {
+    assert.deepEqual(delta(lookup(catalog, previous, args)), { added: [], evicted: [], unchanged: previous });
+  }
+  const reset = lookup(catalog, previous, { reset: true });
+  assert.deepEqual(delta(reset), { added: [], evicted: previous, unchanged: [] });
+  const empty = lookup(catalog, [], { reset: true });
+  assert.deepEqual(delta(empty), { added: [], evicted: [], unchanged: [] });
+  for (const args of [{ names: [previous[0]] }, { query: 'browser' }, { names: previous.toReversed(), replace: true }]) {
+    const result = lookup(catalog, previous, args);
+    assert.deepEqual(result.selected, previous.toReversed());
+    assert.deepEqual(delta(result), { added: [], evicted: [], unchanged: previous.toReversed() });
+  }
+  for (const args of [{ names: [N('github_get_file_contents')] }, { query: 'github file' }]) {
+    assert.deepEqual(delta(lookup(catalog, previous, args)), {
+      added: [N('github_get_file_contents')], evicted: [], unchanged: previous
+    });
+  }
+  assert.deepEqual(delta(lookup(catalog, previous, { names: [previous[0]], replace: true })), {
+    added: [], evicted: [previous[1]], unchanged: [previous[0]]
+  });
+});
+
+test('delta names stay bounded and reselecting at capacity cannot evict a cleanup tool', () => {
+  const previous = Array.from({ length: MAX_LOADED }, (_, index) => N(`old_${index}`));
+  const fresh = Array.from({ length: MAX_LOADED }, (_, index) => N(`new_${index}`));
+  const tools = [...previous, ...fresh].map(name => ({ name, description: name }));
+  const reselected = lookup(tools, previous, { names: [previous[0]] });
+  assert.deepEqual(reselected.selected, [...previous.slice(1), previous[0]]);
+  assert.deepEqual(delta(reselected), { added: [], evicted: [], unchanged: reselected.selected });
+  const incremental = lookup(tools, previous, { names: fresh.slice(0, MAX_BATCH) });
+  assert.deepEqual(delta(incremental), {
+    added: fresh.slice(0, MAX_BATCH), evicted: previous.slice(0, MAX_BATCH), unchanged: previous.slice(MAX_BATCH)
+  });
+  const replaced = lookup(tools, previous, { names: fresh, replace: true });
+  assert.deepEqual(delta(replaced), { added: fresh, evicted: previous, unchanged: [] });
+  for (const result of [reselected, incremental, replaced, lookup(tools, previous, {}), lookup(tools, previous, { reset: true })]) {
+    for (const list of [result.selected, result.added, result.evicted, result.unchanged]) {
+      assert.equal(validSelection(list), true);
+    }
+  }
+});
+
+test('replacement uses the existing selection-only projection and rejects unsuccessful or mismatched commits', () => {
+  const previous = [D('close_session'), S('terminal_execute')];
+  const pending = foldSelection({ selected: previous, pending: [] }, {
+    type: 'tool/call', seq: 5, data: { name: TOOL_NAME, callId: 'replacement', turn: 2, step: 3 }
+  });
+  const replacement = lookup(directory, previous, { names: [D('close_session')], replace: true });
+  const event = {
+    type: 'tool/result', seq: 6, surfaceOp: 'append', sourceEventSeqs: [5],
+    data: { turn: 2, step: 3, message: { toolCallId: 'replacement', isError: false }, meta: { tag: META_TAG, selected: replacement.selected } }
+  };
+  assert.deepEqual(foldSelection(pending, event), { selected: [D('close_session')], pending: [] });
+  for (const invalid of [
+    { ...event, sourceEventSeqs: [] }, { ...event, sourceEventSeqs: [4] }, { ...event, sourceEventSeqs: [5, 6] },
+    { ...event, data: { ...event.data, turn: 3 } }, { ...event, data: { ...event.data, step: 4 } },
+    { ...event, data: { ...event.data, error: { message: 'denied' } } },
+    { ...event, data: { ...event.data, message: { toolCallId: 'replacement', isError: true } } },
+    { ...event, data: { ...event.data, meta: { tag: 'wrong', selected: replacement.selected } } }
+  ]) {
+    assert.deepEqual(foldSelection(pending, invalid), { selected: previous, pending: [] });
+  }
+  assert.deepEqual(parseProjectionState(foldSelection(pending, event)), { selected: [D('close_session')], pending: [] });
 });
 
 test('foldSelection only commits a matching, successful native result', () => {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-11-04
+
+- Add `added`, `evicted` and `unchanged` selection deltas to every successful lookup result. Reselecting an existing tool refreshes recency without reporting a false addition or eviction.
+- Add `replace: true` alongside exact `names` to atomically replace a task-phase set with 1–12 tools. All names must exist; failure retains the committed selection. Incremental loading stays limited to 1–6 and keeps its existing unavailable-name behavior.
+- Preserve the 12-tool cap, committed-result metadata/projection format, immediately adjacent request updates, original definitions, native finalizers and external deny/guard decisions. This plugin does not select filesystem or approval permissions.
+- Add core and real AgentLoop regressions for replacement, validation failures, selection deltas, cleanup tools, restored state and independent agents.
+
+Git tag: `v1.2.0`. Install with `github:donhac/dsh-magpie-discovery#v1.2.0`.
+
 ## 1.1.0 — 2026-11-03
 
 - Refresh the session projection and visibility mask synchronously after committed native tool results, before the next schema assembly. A successful discovery result is available in the immediately following model request.
